@@ -25,6 +25,7 @@ public enum FirmwareGuestSystemPatchSet {
     public static let attitude = "system-apps-cfw-attitude"
 
     public static let paravirtGPUIndexOffset = "system-paravirt_gpu-cfw-heap_index_offset"
+    public static let paravirtGPUPVRTCUpload = "system-paravirt_gpu-cfw-pvrtc_upload"
     public static let paravirtGPUDriverPath =
         "System/Library/Extensions/AppleParavirtGPUMetalIOGPUFamily.bundle/AppleParavirtGPUMetalIOGPUFamily"
 
@@ -239,7 +240,21 @@ public enum FirmwareGuestSystemPatchSet {
                 Makes the paravirtual GPU driver send every indexed draw with 64-bit offsets. Its \
                 compact command keeps an index buffer's heap offset in 16 bits, so meshes whose \
                 indices sit 64 KiB or more into an MTLHeap (Unity games) draw with another \
-                mesh's indices.
+                mesh's indices. The full command also stops zeroing baseVertex to 16 bits.
+                """,
+                target: .guestExecutable(path: "/\(paravirtGPUDriverPath)"),
+                applicability: VPhonePatchApplicability(cloudOS: .release(major: 26, minor: 4)),
+            ),
+            VPhonePatchDeclaration(
+                identifier: paravirtGPUPVRTCUpload,
+                title: "GPU PVRTC uploads",
+                summary: """
+                Makes the paravirtual GPU driver upload and read back PVRTC levels whole. Metal \
+                requires bytesPerRow 0 for them, and the driver's compressed copy then reads \
+                every block row from row 0 — textures draw as vertical streaks (Free Fire) — \
+                and the blob's twiddled block order must be undone into the backing's raster \
+                order. A routine placed in the driver's own __TEXT padding does both; every \
+                other format is copied as before.
                 """,
                 target: .guestExecutable(path: "/\(paravirtGPUDriverPath)"),
                 applicability: VPhonePatchApplicability(cloudOS: .release(major: 26, minor: 4)),

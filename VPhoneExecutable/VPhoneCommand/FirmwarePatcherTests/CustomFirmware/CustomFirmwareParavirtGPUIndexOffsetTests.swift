@@ -30,7 +30,7 @@ private enum GPUDriverFixture {
         .deletingLastPathComponent()
 
     static let pristineSHA256 = "29ba36c7bc87d82c40fa1cecdf357e7a383fa70eb46df0d75869f5ac562aedbc"
-    static let patchedSHA256 = "5c172ab9ff049e7107ea9e4bd276c6b024f6b31e4556f9a847e5be5e6692cf2d"
+    static let patchedSHA256 = "79138287f8005569887a8cf08dfe3aa19f4a912e148a62ede04fb38ff4d66f51"
 
     static var pristine: URL? {
         let directory = ProcessInfo.processInfo.environment["VPHONE_MACHO_PRISTINE"]
@@ -107,6 +107,13 @@ private struct SyntheticDriver {
             file.replaceSubrange(full ..< full + 8,
                                  with: Patcher.setup(size: site.fullSize, command: site.fullCommand))
         }
+
+        // The baseVertex mask inside the correct-base-vertex method's full
+        // command — the site at index 2 — after its setup pair.
+        file.replaceSubrange(
+            Self.branchOffset(2) + Self.fullCommandDistance + 8 ..< Self.branchOffset(2) + Self.fullCommandDistance + 12,
+            with: ARM64.encodeU32(Patcher.baseVertexMaskWord),
+        )
         data = file
     }
 
@@ -131,6 +138,11 @@ struct CustomFirmwareParavirtGPUIndexOffsetTests {
             let expected = ARM64Encoder.encodeB(from: branch, to: branch + SyntheticDriver.fullCommandDistance)
             #expect(driver.data[branch ..< branch + 4] == expected)
         }
+        // The baseVertex mask becomes mov x8, x28.
+        let mask = SyntheticDriver.branchOffset(2) + SyntheticDriver.fullCommandDistance + 8
+        #expect(report.baseVertex.fileOffset == mask)
+        #expect(report.baseVertex.state == .patched)
+        #expect(driver.data[mask ..< mask + 4] == ARM64Encoder.encodeMovX(rd: 8, rm: 28))
     }
 
     @Test func `A second run recognises its own output and writes nothing`() throws {
@@ -140,6 +152,8 @@ struct CustomFirmwareParavirtGPUIndexOffsetTests {
         let report = try Patcher.patch(&driver.data, log: nil)
         #expect(report.sitesWritten == 0)
         #expect(report.sites.allSatisfy { $0.state == .alreadyPatched })
+        #expect(report.baseVertex.state == .alreadyPatched)
+        #expect(!report.wroteAnything)
         #expect(driver.data == once)
     }
 
@@ -166,6 +180,22 @@ struct CustomFirmwareParavirtGPUIndexOffsetTests {
         #expect(throws: PatcherError.self) { try Patcher.patch(&driver.data, log: nil) }
     }
 
+    @Test func `A missing baseVertex mask refuses and changes nothing`() throws {
+        var driver = SyntheticDriver()
+        let mask = SyntheticDriver.branchOffset(2) + SyntheticDriver.fullCommandDistance + 8
+        driver.data.replaceSubrange(mask ..< mask + 4, with: ARM64.encodeU32(0xD503_201F)) // nop
+        let before = driver.data
+        #expect(throws: PatcherError.self) { try Patcher.patch(&driver.data, log: nil) }
+        #expect(driver.data == before)
+    }
+
+    @Test func `Two baseVertex masks in the window refuse`() throws {
+        var driver = SyntheticDriver()
+        let mask = SyntheticDriver.branchOffset(2) + SyntheticDriver.fullCommandDistance + 8
+        driver.data.replaceSubrange(mask + 4 ..< mask + 8, with: ARM64.encodeU32(Patcher.baseVertexMaskWord))
+        #expect(throws: PatcherError.self) { try Patcher.patch(&driver.data, log: nil) }
+    }
+
     @Test func `Branch decoding round-trips both directions`() {
         #expect(Patcher.compareBranchDisplacement(0xB500_00DC) == 0x18) // cbnz x28, +0x18
         #expect(Patcher.compareBranchDisplacement(0x3400_0178) == 0x2C) // cbz w24, +0x2c
@@ -186,6 +216,7 @@ struct CustomFirmwareParavirtGPUIndexOffsetTests {
         let report = try Patcher.patch(&data, log: nil)
         #expect(report.sites.map(\.fileOffset) == [0x1421C, 0x140B0, 0x143B4, 0x143C4])
         #expect(report.sites.map(\.targetFileOffset) == [0x14234, 0x140C8, 0x143DC, 0x143F0])
+        #expect(report.baseVertex.fileOffset == 0x144E0)
         #expect(GPUDriverFixture.sha256(data) == GPUDriverFixture.patchedSHA256)
         #expect(try Patcher.patch(&data, log: nil).sitesWritten == 0)
     }

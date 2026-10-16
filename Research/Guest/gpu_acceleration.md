@@ -413,6 +413,86 @@ Verified on the iPad guest with the patched driver in place: every heap row
 above covers 100%, the plain-buffer probe is unchanged, and Subway Surfers
 draws its menu scene and gameplay correctly.
 
+### baseVertex in the full indexed-draw command
+
+On a host that reports `supportsCorrectBaseVertex` (ivar 0x1421, set at
+`0x12b8c`), the `baseVertex:baseInstance:` method sends commands 0x1d
+(compact) and 0x1c (full). The full one serialises `baseVertex` through
+`and x8, x28, #0xffff` at `0x144e0` — zero-extended from 16 bits. Routing
+every draw through the full command (the heap fix above) made a negative
+`baseVertex` draw from the wrong vertices, where the compact command used to
+carry it whole; values of 65536 or more were already broken in the original.
+
+```
+                          original   heap fix only   heap fix + mask fix
+baseVertex -100           OK         BAD             OK
+baseVertex 40000          OK         OK              OK
+baseVertex 70000          BAD        BAD             OK
+```
+
+The mask is unique in `__text`, so it is found by content inside the command
+it belongs to and replaced with `mov x8, x28` (`orr x8, xzr, x28`); the host
+reads the field at full width. `system-paravirt_gpu-cfw-heap_index_offset`
+carries this fifth word with its other four.
+
+## PVRTC Uploads
+
+Free Fire (`com.dts.freefireth` 1.132.1, Unity) drew every 3D surface
+streaked: each region smeared along one screen axis, mostly vertical, with a
+zipper pattern at the edges. Silhouettes were correct and the UI was clean —
+a texture fault, not geometry. Seen 2026-10-16 on an iPhone iOS 27.0.1 guest
+of the same cloudOS 26.4 (23E5207q) driver; the original driver shows the
+same streaks under the scrambled meshes, so this is not a regression of the
+heap index fix.
+
+### Measured
+
+A logging tweak loaded into the game showed nearly every 3D texture is PVRTC
+(pixel formats 166 and 162), many with mipmaps, all uploaded from the CPU
+with `replaceRegion:`. A probe (`PvrProbe`) fills every level with the same
+data in the guest and on the host, draws each level with a nearest sampler,
+and compares pixels; a probe scene is BAD when any channel is off by more
+than 8:
+
+```
+original / heap-fix driver                   pixels differing from the host
+pvrtc rgba4 128 mips replace L0..L4        100.0  100.0  99.9  99.6  98.4   BAD
+pvrtc rgba4 128 mips blit    L0..L7          0.0 (all)                       OK
+pvrtc rgb2  512 nomip replace L0            99.9                            BAD
+total: 52 of 72 scenes BAD (every replaceRegion level of 8x8 or more)
+```
+
+RGBA8 and ASTC textures, vertex data, samplers and anisotropy all matched
+the host exactly. With the stride alone fixed, the guest output matched a
+host upload of the payload with its blocks moved from raster to Morton order
+exactly — the guest must un-twiddle as well.
+
+### The patch
+
+`system-paravirt_gpu-cfw-pvrtc_upload`: a 320-byte leaf routine
+(`pvrtc_cave.s` in this folder; the patcher's frozen words are its assembled
+form) goes into the zero padding at the end of `__TEXT` (7 KiB are free and
+mapped r-x), and the two `bl` calls that reach `_doCompressedBlit` from
+`-[AppleParavirtTexture replaceRegion:…]` (`0x8df4`) and `getBytes:…`
+(`0x8ae8`) call it instead. With both strides non-zero — every non-PVRTC
+copy — the routine branches straight to `_doCompressedBlit` and the bytes it
+moves are unchanged. With a zero stride on one side and 8-byte blocks it
+walks the twiddle block by block: `raster[y][x] = blob[TwiddleUV(y, x)]`
+going in, the inverse coming back.
+
+Nothing is a literal address: `_doCompressedBlit` resolves by exact symbol
+name, the four calls of it in `__text` are enumerated (two are redirected,
+the later pair belongs to `AppleParavirtTextureLayout` and nothing measured
+reaches them), and the routine lands at the first 16-byte-aligned word after
+the last non-zero word of `__TEXT` (`0x56490` in 23E5207q). The routine's
+own `b _doCompressedBlit` is re-encoded from where it lands. A driver laid
+out otherwise is refused unchanged (`CustomFirmwareParavirtGPUPVRTCUpload`).
+
+Verified on the iPhone guest: 72/72 probe scenes pixel-identical to the
+host, the `getBytes` round-trip identical to the host's, no regressions in
+the heap, plain-buffer, sampler, vertex-format or baseVertex probes, and
+Free Fire renders its nickname screen correctly.
+
 ## Settings That Do Nothing Here
 
 Both are private properties of `VZMacGraphicsDeviceConfiguration`, tried on

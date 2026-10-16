@@ -34,6 +34,17 @@
 // value does not fit in 16 bits, so the host accepts them; the cost is 12 to 28
 // bytes more per indexed draw in the command stream.
 //
+// One word more. On a host that reports `supportsCorrectBaseVertex` the
+// correct-base-vertex method's full command (0x1c) serialises `baseVertex`
+// through `and x8, x28, #0xffff` — zero-extended from 16 bits. Sending every
+// draw there (above) makes a negative `baseVertex` draw from the wrong
+// vertices, where the compact command used to carry it whole; values of
+// 65536 or more were already broken. The mask is unique in `__text`, so it
+// is found by content inside the command it belongs to and replaced with
+// `mov x8, x28` (`orr x8, xzr, x28`); the host reads the field at full
+// width. See `Research/Guest/gpu_acceleration.md` ("baseVertex in the full
+// indexed-draw command").
+//
 // Finding the sites. Each compact command is set up as
 //
 //     cbz/cbnz <reg>, <full>   ; mov w2, #<size> ; mov w3, #<command> ; …
@@ -91,11 +102,38 @@ public enum CustomFirmwareParavirtGPUIndexOffset {
         public let state: SiteState
     }
 
+    /// The `and x8, x28, #0xffff` the correct-base-vertex method's full
+    /// command uses to serialise `baseVertex`.
+    public struct ResolvedBaseVertex: Sendable, Equatable {
+        public let fileOffset: Int
+        public let state: SiteState
+    }
+
     public struct Report: Sendable, Equatable {
         public let sites: [ResolvedSite]
+        public let baseVertex: ResolvedBaseVertex
         public var sitesWritten: Int {
             sites.count(where: { $0.state == .patched })
         }
+
+        public var wroteAnything: Bool {
+            sitesWritten > 0 || baseVertex.state == .patched
+        }
+    }
+
+    /// `and x8, x28, #0xffff` — the 16-bit mask the full command 0x1c holds
+    /// `baseVertex` through. Unique in `__text` in 23E5207q.
+    static let baseVertexMaskWord: UInt32 = 0x9240_3F88
+
+    /// How far after the correct-base-vertex full command's setup the mask
+    /// may sit. 0x104 in 23E5207q; the window only rules out a coincidence
+    /// landing in some other method, since the word is already unique.
+    static let baseVertexWindow = 0x200
+
+    /// The site whose full command carries `baseVertex`: the
+    /// correct-base-vertex variant, command 0x1c.
+    static var baseVertexSite: Site {
+        sites[2]
     }
 
     /// Patch the driver binary at `url` in place. The file is rewritten only
@@ -110,7 +148,7 @@ public enum CustomFirmwareParavirtGPUIndexOffset {
         }
         var data = try Data(contentsOfFileToRewrite: url)
         let report = try patch(&data, log: log)
-        if report.sitesWritten > 0 {
+        if report.wroteAnything {
             try data.write(to: url)
         }
         return report
@@ -126,7 +164,7 @@ public enum CustomFirmwareParavirtGPUIndexOffset {
             data = Data(data)
         }
         let resolved = try resolve(in: data)
-        for item in resolved {
+        for item in resolved.sites {
             switch item.state {
             case .patched:
                 guard let branch = ARM64Encoder.encodeB(from: item.fileOffset, to: item.targetFileOffset) else {
@@ -140,11 +178,21 @@ public enum CustomFirmwareParavirtGPUIndexOffset {
                 log?("  [·] 0x\(hex(item.fileOffset)): \(item.site.method) — already sends the full command")
             }
         }
-        return Report(sites: resolved)
+        switch resolved.baseVertex.state {
+        case .patched:
+            data.replaceSubrange(
+                resolved.baseVertex.fileOffset ..< resolved.baseVertex.fileOffset + 4,
+                with: ARM64Encoder.encodeMovX(rd: 8, rm: 28),
+            )
+            log?("  [+] 0x\(hex(resolved.baseVertex.fileOffset)): full command 0x1c — and x8, x28, #0xffff -> mov x8, x28 (baseVertex whole)")
+        case .alreadyPatched:
+            log?("  [·] 0x\(hex(resolved.baseVertex.fileOffset)): full command 0x1c — already keeps baseVertex whole")
+        }
+        return resolved
     }
 
     /// Resolve every site, or throw without having changed anything.
-    public static func resolve(in data: Data) throws -> [ResolvedSite] {
+    public static func resolve(in data: Data) throws -> Report {
         let sections = MachOParser.parseSections(from: data)
         guard let text = sections["__TEXT,__text"] else {
             throw PatcherError.invalidFormat("not a 64-bit Mach-O with a __TEXT,__text section")
@@ -154,7 +202,39 @@ public enum CustomFirmwareParavirtGPUIndexOffset {
         guard start >= 0, end <= data.count, start < end else {
             throw PatcherError.invalidFormat("__TEXT,__text lies outside the file")
         }
-        return try sites.map { try resolve($0, in: data, text: start ..< end) }
+        let sites = try sites.map { try resolve($0, in: data, text: start ..< end) }
+        let baseVertex = try resolveBaseVertex(in: data, text: start ..< end, sites: sites)
+        return Report(sites: sites, baseVertex: baseVertex)
+    }
+
+    /// The baseVertex mask: the `and x8, x28, #0xffff` inside the
+    /// correct-base-vertex method's full command, or this patch's own
+    /// `mov x8, x28` on a re-run. Exactly one of the two, within the
+    /// command it belongs to; nothing is written on ambiguity.
+    static func resolveBaseVertex(
+        in data: Data,
+        text: Range<Int>,
+        sites: [ResolvedSite],
+    ) throws -> ResolvedBaseVertex {
+        guard let fullCommand = sites.first(where: { $0.site == baseVertexSite }) else {
+            throw PatcherError.patchSiteNotFound("the baseVertex:baseInstance: site did not resolve")
+        }
+        let window = fullCommand.targetFileOffset ..< min(fullCommand.targetFileOffset + baseVertexWindow, text.upperBound)
+        let masks = offsets(of: ARM64.encodeU32(baseVertexMaskWord), in: data, range: window)
+        let moves = offsets(
+            of: ARM64Encoder.encodeMovX(rd: 8, rm: 28),
+            in: data,
+            range: window,
+        )
+        if masks.count == 1, moves.isEmpty {
+            return ResolvedBaseVertex(fileOffset: masks[0], state: .patched)
+        }
+        if moves.count == 1, masks.isEmpty {
+            return ResolvedBaseVertex(fileOffset: moves[0], state: .alreadyPatched)
+        }
+        throw PatcherError.patchSiteNotFound(
+            "the full command 0x1c's baseVertex mask did not resolve (\(masks.count) and, \(moves.count) mov in its window); this is not the cloudOS 26.4 (23E5207q) driver",
+        )
     }
 
     static func resolve(_ site: Site, in data: Data, text: Range<Int>) throws -> ResolvedSite {

@@ -1409,27 +1409,39 @@ struct VPhoneCustomFirmwareInstaller {
         }
 
         // The driver's compact indexed-draw commands truncate a heap index
-        // buffer's offset to 16 bits. After the bundle step on purpose:
-        // `installGPUBundle` replaces the whole bundle, `.bak` included, so the
-        // backup taken here is always the staged driver — and a bundle it just
-        // reinstalled is already pristine, which is what "off" means.
-        let gpuIndexOffset = FirmwareGuestSystemPatchSet.paravirtGPUIndexOffset
+        // buffer's offset (and baseVertex) to 16 bits, and its
+        // compressed-upload copy repeats each PVRTC block row from row 0.
+        // Two patches ride one staged driver (`patchMachO` stages from the
+        // pristine backup, so two calls would not compose), after the
+        // bundle step on purpose: `installGPUBundle` replaces the whole
+        // bundle, `.bak` included, so the backup taken here is always the
+        // staged driver — and a bundle it just reinstalled is already
+        // pristine, which is what "off" means.
+        let gpuPatches: [(id: String, verb: String)] = [
+            (FirmwareGuestSystemPatchSet.paravirtGPUIndexOffset, "patch-paravirt-gpu-index-offset"),
+            (FirmwareGuestSystemPatchSet.paravirtGPUPVRTCUpload, "patch-paravirt-gpu-pvrtc-upload"),
+        ]
         let gpuDriver = FirmwareGuestSystemPatchSet.paravirtGPUDriverPath
         let gpuBundle = "System/Library/Extensions/\(VPhonePCCGPUDriver.name)"
-        isolate([gpuIndexOffset]) {
-            if on(gpuIndexOffset) {
+        let gpuOn = gpuPatches.filter { on($0.id) }
+        isolate(gpuPatches.map(\.id)) {
+            if !gpuOn.isEmpty {
                 try patchMachO(
                     system: system, work: work, path: gpuDriver,
-                    verbs: ["patch-paravirt-gpu-index-offset"],
+                    verbs: gpuOn.map(\.verb),
                     identifier: "com.apple.driver.AppleParavirtGPUMetalIOGPUFamily",
                 )
                 try sealGuestBundle(system: system, bundle: gpuBundle)
-                live.insert(gpuIndexOffset)
+                for patch in gpuOn {
+                    live.insert(patch.id)
+                }
             } else if try revertMachO(system: system, work: work, path: gpuDriver, bundle: gpuBundle) {
-                print("  [+] \(gpuIndexOffset): restored \(gpuDriver) from backup")
-            } else if priorGuest.contains(gpuIndexOffset), !gpuBundleReinstalled {
-                print("  [!] \(gpuIndexOffset): off now but no backup to revert; leaving the patched driver (not revertible)")
-                live.insert(gpuIndexOffset)
+                print("  [+] GPU driver restored from backup (both paravirt GPU patches off)")
+            } else {
+                for patch in gpuPatches where priorGuest.contains(patch.id) && !gpuBundleReinstalled {
+                    print("  [!] \(patch.id): off now but no backup to revert; leaving the patched driver (not revertible)")
+                    live.insert(patch.id)
+                }
             }
         }
 

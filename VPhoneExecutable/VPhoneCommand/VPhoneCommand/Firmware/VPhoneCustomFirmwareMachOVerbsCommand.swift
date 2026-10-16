@@ -520,11 +520,12 @@ struct VPhoneCustomFirmwarePatchParavirtGPUIndexOffsetCommand: ParsableCommand {
         then stores the index buffer's heap offset plus indexBufferOffset in
         that 16-bit field. An index buffer 64 KiB or more into an MTLHeap is
         read from the wrong address, and meshes draw with another mesh's
-        indices. Each selecting cbz/cbnz becomes a b to the full command.
+        indices. Each selecting cbz/cbnz becomes a b to the full command,
+        which also stops the full command zeroing baseVertex to 16 bits.
 
         Each site is found by the compact command's mov w2/mov w3 setup, which
         is unique in __text, and the branch must lead to the full command's
-        setup. Nothing is written unless all four resolve.
+        setup. Nothing is written unless all of them resolve.
 
         Idempotent: a site already branching to the full command is reported
         and the file is not rewritten.
@@ -538,6 +539,40 @@ struct VPhoneCustomFirmwarePatchParavirtGPUIndexOffsetCommand: ParsableCommand {
         try requireUntruncatedMachO(at: binary)
         // No re-attestation: the caller re-signs.
         try CustomFirmwareParavirtGPUIndexOffset.patch(fileAt: binary, log: machOVerbLog)
+    }
+}
+
+// MARK: - patch-paravirt-gpu-pvrtc-upload
+
+struct VPhoneCustomFirmwarePatchParavirtGPUPVRTCUploadCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "patch-paravirt-gpu-pvrtc-upload",
+        abstract: "Upload and read back PVRTC levels whole from the paravirtual GPU driver",
+        discussion: """
+        Metal requires bytesPerRow 0 for PVRTC, and the driver's
+        _doCompressedBlit then copies every block row from row 0, so a
+        PVRTC level draws as vertical streaks; the blob's twiddled block
+        order also has to be undone into the backing's raster order. A
+        320-byte routine — placed in the __TEXT padding, non-PVRTC copies
+        untouched — walks the twiddle block by block, and the replaceRegion:
+        and getBytes: calls go to it instead.
+
+        The routine is found through the symbol table, the calls by
+        enumerating every bl to it, and the padding by content. Nothing is
+        written unless everything resolves.
+
+        Idempotent: the routine in place and both calls already redirected
+        are reported and the file is not rewritten.
+        """,
+    )
+
+    @Argument(help: "Path to the AppleParavirtGPUMetalIOGPUFamily Mach-O, patched in place", transform: URL.init(fileURLWithPath:))
+    var binary: URL
+
+    func run() throws {
+        try requireUntruncatedMachO(at: binary)
+        // No re-attestation: the caller re-signs.
+        try CustomFirmwareParavirtGPUPVRTCUpload.patch(fileAt: binary, log: machOVerbLog)
     }
 }
 
@@ -560,6 +595,7 @@ enum VPhoneCustomFirmwareMachOVerbs {
             VPhoneCustomFirmwarePatchVirtualAudioSPGateCommand.self,
             VPhoneCustomFirmwarePatchVirtualAudioVolumeGateCommand.self,
             VPhoneCustomFirmwarePatchParavirtGPUIndexOffsetCommand.self,
+            VPhoneCustomFirmwarePatchParavirtGPUPVRTCUploadCommand.self,
         ]
     }
 }

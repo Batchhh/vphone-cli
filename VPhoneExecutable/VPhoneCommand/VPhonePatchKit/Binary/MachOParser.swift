@@ -179,6 +179,24 @@ public enum MachOParser {
 
     /// Find a symbol containing the given name fragment. Returns its virtual address.
     public static func findSymbol(containing fragment: String, in data: Data) -> UInt64? {
+        findSymbolEntry(in: data, { $0.contains(fragment) })?.value
+    }
+
+    /// Find a symbol by exact name. Returns its virtual address.
+    ///
+    /// `findSymbol(containing:)` matches substrings, so it cannot pin a
+    /// routine whose name another symbol merely contains. Returns nil unless
+    /// the whole string matches.
+    public static func findSymbol(named name: String, in data: Data) -> UInt64? {
+        findSymbolEntry(in: data, { $0 == name })?.value
+    }
+
+    /// Walk the symbol table, handing `matches` each name; the first match
+    /// wins, as `findSymbol(containing:)` always has.
+    private static func findSymbolEntry(
+        in data: Data,
+        _ matches: (String) -> Bool,
+    ) -> (name: String, value: UInt64)? {
         guard let symtab = parseSymtab(from: data) else { return nil }
 
         for i in 0 ..< symtab.nsyms {
@@ -203,9 +221,9 @@ public enum MachOParser {
             }
 
             if let name = String(data: data[strStart ..< strEnd], encoding: .ascii),
-               name.contains(fragment)
+               matches(name)
             {
-                return nValue
+                return (name, nValue)
             }
         }
         return nil

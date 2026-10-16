@@ -26,6 +26,7 @@ struct FirmwareGuestPatchResolutionTests {
         #expect(unvalidated.contains("system-launchdaemons-boot-environment"))
         #expect(unvalidated.contains("system-extensions-boot-gpu_bundle"))
         #expect(unvalidated.contains(FirmwareGuestSystemPatchSet.paravirtGPUIndexOffset))
+        #expect(unvalidated.contains(FirmwareGuestSystemPatchSet.paravirtGPUPVRTCUpload))
         #expect(unvalidated.contains("dyld-cfw-camera"))
         #expect(!unvalidated.contains("system-seputil-boot-gigalocker_uuid"))
         #expect(!unvalidated.contains("system-gigalocker-boot-rename"))
@@ -84,6 +85,7 @@ struct FirmwareGuestPatchResolutionTests {
         #expect(tv4K.isEnabled("system-vphoned-boot-install"))
         // The upstream GPU heap index patch stays out, as for every TV guest.
         #expect(!tv4K.isEnabled(FirmwareGuestSystemPatchSet.paravirtGPUIndexOffset))
+        #expect(!tv4K.isEnabled(FirmwareGuestSystemPatchSet.paravirtGPUPVRTCUpload))
         #expect(FirmwareGuestPatchResolution.unvalidatedTVGuestPatches(enabled: tv4K.enabled, arm64eUserland: true).isEmpty)
         #expect(FirmwareGuestPatchResolution.unvalidatedTVGuestPatches(enabled: tv4K.enabled) == [gpu, ota].sorted())
         // The 27 shared-cache patches are on but meet only a 27 userland.

@@ -241,6 +241,7 @@ public enum FirmwarePatchSetCatalog {
         "system-locationd-cfw-disable_auto_cohort",
         "system-mobileactivationd-boot-should_hactivate",
         "system-paravirt_gpu-cfw-heap_index_offset",
+        "system-paravirt_gpu-cfw-pvrtc_upload",
         "system-systemversion-cfw-build_version",
         "system-virtiosound-cfw-hal_plugin",
         "system-virtualaudio-cfw-microphone_graph_chains",
